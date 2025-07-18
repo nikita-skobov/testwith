@@ -14,7 +14,6 @@ pub trait FnWithSomeAmountOfArgsAsync {
 }
 
 pub trait Undo: Send {
-    fn create() -> Self where Self: Sized;
     fn undo(&mut self);
 }
 
@@ -23,11 +22,6 @@ macro_rules! impl_undo_tuple {
         $(
             #[allow(non_snake_case, unused)]
             impl<$($gen: Undo),*> Undo for ($($gen),*) {
-                fn create() -> Self where Self: Sized {
-                    (
-                        $($gen::create()),*
-                    )
-                }
                 fn undo(&mut self) {
                     let ($($gen),*) = self;
                     println!("deleting tuple");
@@ -197,8 +191,7 @@ impl<T: Undo + Clone + 'static> TestWith<T> {
 }
 
 impl TestContext {
-    pub fn create<T: Undo + Clone + 'static>(&self) -> TestWith<T> {
-        let t: T = T::create();
+    pub fn create<T: Undo + Clone + 'static>(&self, t: T) -> TestWith<T> {
         let _ = self.undo_tx.send(Box::new(t.clone()));
         TestWith { ctx: self.clone(), t }
     }
@@ -270,7 +263,7 @@ pub fn setup_test_holder() -> (TestContext, TestResultHolder) {
 /// #[test]
 /// fn a() {
 ///     run_tests(async |ctx| {
-///         ctx.create::<DynamoTable>()
+///         ctx.create(DynamoTable { table_name: "a" })
 ///             .test_one(aaa)
 ///             .test_one(|a| {})
 ///             .transform(|d| { (d, S3Object::default())})
@@ -304,10 +297,6 @@ mod test {
     #[derive(Clone)]
     pub struct SomeResource { pub x: u32 }
     impl Undo for SomeResource {
-        fn create() -> Self where Self: Sized {
-            SomeResource { x: 0 }
-        }
-    
         fn undo(&mut self) {
             println!("deleting some resource");
         }
@@ -315,15 +304,16 @@ mod test {
 
     #[derive(Clone)]
     pub struct SomeFile { pub path: PathBuf }
-    impl Undo for SomeFile {
-        fn create() -> Self where Self: Sized {
-            let p = PathBuf::from("/tmp/somefile.txt");
-            let _ = std::fs::write(&p, "hello");
-            Self { path: p }
-        }
-    
+    impl Undo for SomeFile {    
         fn undo(&mut self) {
             let _ = std::fs::remove_file(&self.path);
+        }
+    }
+    impl SomeFile {
+        pub fn new(s: &str) -> Self {
+            let p = PathBuf::from(s);
+            std::fs::write(&p, "hello").expect("failed to create file");
+            Self { path: p }
         }
     }
 
@@ -338,7 +328,7 @@ mod test {
     #[test]
     fn can_test_with_closure() {
         run_tests(async |ctx| {
-            ctx.create::<SomeResource>().test_one(|a| {
+            ctx.create(SomeResource { x: 0 }).test_one(|a| {
                 assert_eq!(a.x, 0);
             });
         });
@@ -348,7 +338,7 @@ mod test {
     #[should_panic]
     fn can_test_with_closure_err() {
         run_tests(async |ctx| {
-            ctx.create::<SomeResource>().test_one(|a| {
+            ctx.create(SomeResource { x: 0 }).test_one(|a| {
                 assert_eq!(a.x, 1);
             });
         });
@@ -365,7 +355,7 @@ mod test {
     #[test]
     fn can_test_async() {
         run_tests(async |ctx| {
-            ctx.create::<SomeResource>()
+            ctx.create(SomeResource { x: 0 })
                 .test_one_async(async |_| {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 })
@@ -385,7 +375,7 @@ mod test {
     #[test]
     fn can_test_with_fn() {
         run_tests(async |ctx| {
-            ctx.create::<SomeResource>().test_one(test_resource);
+            ctx.create(SomeResource { x: 0 }).test_one(test_resource);
         });
     }
 
@@ -395,7 +385,7 @@ mod test {
     #[test]
     fn can_test_without_type_t() {
         run_tests(async |ctx| {
-            ctx.create::<SomeResource>()
+            ctx.create(SomeResource { x: 0 })
                 .test_without(|| {})
                 .test_without_async(test_without_async)
                 .test_without(test_without)
@@ -407,7 +397,7 @@ mod test {
     #[should_panic]
     fn can_test_with_fn_err() {
         run_tests(async |ctx| {
-            ctx.create::<SomeResource>()
+            ctx.create(SomeResource { x: 0 })
                 .transform(|mut a| { a.x = 1; a })
                 .test_one(test_resource);
         });
@@ -418,7 +408,7 @@ mod test {
         // the file shouldnt exist yet because we havent started the test:
         assert!(!std::fs::exists("/tmp/somefile.txt").expect("it shouldnt fail"));
         run_tests(async |ctx| {
-            ctx.create::<SomeFile>()
+            ctx.create(SomeFile::new("/tmp/somefile.txt"))
                 .test_one(|f| {
                     let f_data = std::fs::read_to_string(&f.path).expect("it shouldnt fail");
                     assert_eq!(f_data, "hello");
@@ -434,9 +424,9 @@ mod test {
     #[should_panic]
     fn undo_gets_called_err() {
         // the file shouldnt exist yet because we havent started the test:
-        assert!(!std::fs::exists("/tmp/somefile.txt").expect("it shouldnt fail"));
+        assert!(!std::fs::exists("/tmp/somefile2.txt").expect("it shouldnt fail"));
         run_tests(async |ctx| {
-            ctx.create::<SomeFile>()
+            ctx.create(SomeFile::new("/tmp/somefile2.txt"))
                 .test_one(|f| {
                     let f_data = std::fs::read_to_string(&f.path).expect("it shouldnt fail");
                     // if we panic here, it should still get cleaned up
@@ -444,6 +434,6 @@ mod test {
                 });
         });
         // now, the file shouldnt exist because we cleaned it up, despite panicking in the test run
-        assert!(!std::fs::exists("/tmp/somefile.txt").expect("it shouldnt fail"));
+        assert!(!std::fs::exists("/tmp/somefile2.txt").expect("it shouldnt fail"));
     }
 }
