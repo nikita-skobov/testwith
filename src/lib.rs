@@ -118,6 +118,24 @@ pub struct TestWith<T> {
 }
 
 impl<T: Undo + Clone + 'static> TestWith<T> {
+    pub fn test_without<F: Fn() + Send + 'static>(&self, f: F) -> &Self {
+        let fn_name = std::any::type_name::<F>();
+        let task = tokio::task::spawn(async move {
+            f();
+        });
+        let _ = self.ctx.task_tx.send((fn_name.to_string(), task));        
+        self
+    }
+    pub fn test_without_async<Fut, F: Fn() -> Fut + Send + 'static>(&self, f: F) -> &Self
+        where Fut: Future<Output = ()> + Send + 'static
+    {
+        let fn_name = std::any::type_name::<F>();
+        let task = tokio::task::spawn(async move {
+            f().await;
+        });
+        let _ = self.ctx.task_tx.send((fn_name.to_string(), task));        
+        self
+    }
     pub fn test<'a, F: Into<Box<dyn FnWithSomeAmountOfArgs<Args = T>>> + Send + 'static>(&self, f: F) -> &Self
     {
         let fn_name = std::any::type_name::<F>();
@@ -368,6 +386,20 @@ mod test {
     fn can_test_with_fn() {
         run_tests(async |ctx| {
             ctx.create::<SomeResource>().test_one(test_resource);
+        });
+    }
+
+    fn test_without() {}
+    async fn test_without_async() {}
+
+    #[test]
+    fn can_test_without_type_t() {
+        run_tests(async |ctx| {
+            ctx.create::<SomeResource>()
+                .test_without(|| {})
+                .test_without_async(test_without_async)
+                .test_without(test_without)
+                .test_without_async(async || {});
         });
     }
 
