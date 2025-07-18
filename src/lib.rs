@@ -1,8 +1,16 @@
+use std::pin::Pin;
+
 use tokio::{sync::mpsc::{UnboundedReceiver, UnboundedSender}, task::{JoinError, JoinHandle}};
 
 pub trait FnWithSomeAmountOfArgs {
     type Args;
     fn call_with_args(&self, f: Self::Args);
+}
+
+pub trait FnWithSomeAmountOfArgsAsync {
+    type Args;
+    type Fut: Future<Output = ()> + Send;
+    fn call_with_args(&self, f: Self::Args) -> Self::Fut;
 }
 
 pub trait Undo: Send {
@@ -48,6 +56,29 @@ macro_rules! impl_fn_args {
                 fn from(value: F) -> Self {
                     let b: Box<dyn Fn($($gen,)*)> = Box::new(value);
                     let b: Box<dyn FnWithSomeAmountOfArgs<Args = ($($gen,)*)>> = Box::new(b);
+                    b
+                }
+            }
+
+            #[allow(non_snake_case, unused)]
+            impl<$($gen),* , Fut> FnWithSomeAmountOfArgsAsync for Pin<Box<dyn Fn($($gen),*) -> Fut + Send + 'static>>
+                where Fut: Future<Output = ()> + Send
+            {
+                type Args = ($($gen, )*);
+                type Fut = Fut;
+                fn call_with_args(&self, f: Self::Args) -> Self::Fut {
+                    let ($($gen, )*) = f;
+                    self($($gen, )*)
+                }
+            }
+
+            #[allow(non_snake_case, unused)]
+            impl<$($gen: 'static,)* Futur, F: Fn($($gen,)*) -> Futur + Send + 'static> From<F> for Pin<Box<dyn FnWithSomeAmountOfArgsAsync<Args = ($($gen,)*), Fut = Futur> + Send + 'static>>
+                where Futur: Future<Output = ()> + Send + 'static
+            {
+                fn from(value: F) -> Self {
+                    let b: Pin<Box<dyn Fn($($gen,)*) -> Futur + Send + 'static>> = Box::pin(value);
+                    let b: Pin<Box<dyn FnWithSomeAmountOfArgsAsync<Args = ($($gen,)*), Fut = Futur> + Send + 'static>> = Box::pin(b);
                     b
                 }
             }
@@ -98,12 +129,35 @@ impl<T: Undo + Clone + 'static> TestWith<T> {
         let _ = self.ctx.task_tx.send((fn_name.to_string(), task));
         self
     }
+    pub fn test_async<Futur, F: Into<Pin<Box<dyn FnWithSomeAmountOfArgsAsync<Args = T, Fut = Futur> + Send + 'static>>> + Send + 'static>(&self, f: F) -> &Self
+        where Futur: Future<Output = ()> + Send + 'static
+    {
+        let fn_name = std::any::type_name::<F>();
+        let t_clone = self.t.clone();
+        let task = tokio::task::spawn(async move {
+            let f_box: Pin<Box<dyn FnWithSomeAmountOfArgsAsync<Args = T, Fut = Futur> + Send + 'static>> = f.into();
+            f_box.call_with_args(t_clone).await;
+        });
+        let _ = self.ctx.task_tx.send((fn_name.to_string(), task));
+        self
+    }
     pub fn test_one<'a, F: Fn(T) + Send + 'static>(&self, f: F) -> &Self
     {
         let fn_name = std::any::type_name::<F>();
         let t_clone = self.t.clone();
         let task = tokio::task::spawn(async move {
             f(t_clone);
+        });
+        let _ = self.ctx.task_tx.send((fn_name.to_string(), task));
+        self
+    }
+    pub fn test_one_async<'a, Futur, F: Fn(T) -> Futur + Send + 'static>(&self, f: F) -> &Self
+        where Futur: Future<Output = ()> + Send + 'static
+    {
+        let fn_name = std::any::type_name::<F>();
+        let t_clone = self.t.clone();
+        let task = tokio::task::spawn(async move {
+            f(t_clone).await;
         });
         let _ = self.ctx.task_tx.send((fn_name.to_string(), task));
         self
@@ -225,7 +279,7 @@ pub fn run_tests<Fut, F: FnMut(TestContext) -> Fut + Send + 'static>(mut f: F)
 
 #[cfg(test)]
 mod test {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, time::Duration};
 
     use super::*;
 
@@ -279,6 +333,30 @@ mod test {
             ctx.create::<SomeResource>().test_one(|a| {
                 assert_eq!(a.x, 1);
             });
+        });
+    }
+
+    async fn dummy(_: SomeResource) {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    async fn dummy2(_: SomeResource, _: SomeResource) {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    #[test]
+    fn can_test_async() {
+        run_tests(async |ctx| {
+            ctx.create::<SomeResource>()
+                .test_one_async(async |_| {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                })
+                .test_one_async(dummy)
+                .transform(|x| (x.clone(), x))
+                .test_async(dummy2)
+                .test_async(async |_, _| {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                });
         });
     }
 
